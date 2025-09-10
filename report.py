@@ -1,13 +1,19 @@
+# report.py — Plotly 기반 / 폰트(MaruBuri) / PPT & Word 내보내기 지원
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.figure_factory as ff
 import pdfplumber
 import io
 import zipfile
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches as PptxInches
 from datetime import datetime
+
+# Word(.docx)
+from docx import Document
+from docx.shared import Inches as DocxInches
 
 # ===== 한글 폰트 설정 (Matplotlib 대비 및 Plotly 폰트 패밀리 지정용) =====
 from matplotlib import font_manager, rcParams
@@ -43,18 +49,28 @@ def _style_plotly(fig, title=None):
 
 def _fig_to_png_bytes(fig):
     """
-    Plotly figure -> PNG bytes.
-    kaleido 가 필요합니다. (pip install kaleido)
-    kaleido가 없으면 None을 반환합니다.
+    Plotly figure -> PNG bytes (PPT/Excel/Word 삽입용).
+    kaleido 필요. (pip install kaleido)
     """
     try:
-        png_bytes = fig.to_image(format="png", scale=2)  # 고해상도
-        return png_bytes
+        return fig.to_image(format="png", scale=2)
     except Exception:
         return None
 
 
 st.title("✨ 이벤트 결과보고서 자동생성 프로그램 (Plotly 개선판)")
+
+# ===== 차트 옵션 (사이드바) =====
+st.sidebar.header("차트 옵션")
+BIN_MODE = st.sidebar.radio("빈 구분 방법", ["자동", "개수 지정", "간격 지정"], index=0, horizontal=True)
+
+nbins = st.sidebar.slider("빈 개수", 5, 100, 20) if BIN_MODE == "개수 지정" else None
+binsize = st.sidebar.number_input("빈 간격(숫자)", min_value=0.0, value=0.0, step=100.0) if BIN_MODE == "간격 지정" else None
+
+bargap = st.sidebar.slider("막대 간격(bargap)", 0.00, 0.50, 0.20, 0.01)
+show_kde = st.sidebar.checkbox("밀도 곡선(KDE) 표시", value=True)
+y_scale = st.sidebar.selectbox("세로축 단위", ["count", "percent", "probability density"], index=0)
+# =================================
 
 # 여러 파일 업로드 허용
 uploaded_files = st.file_uploader(
@@ -73,31 +89,71 @@ def analyze_excel(file, file_name):
     try:
         st.markdown(df.describe(include="all").to_markdown())
     except Exception:
-        # tabulate 미설치 등으로 to_markdown 실패 시 텍스트로 대체
         st.text(df.describe(include="all").to_string())
 
     num_cols = df.select_dtypes(include="number").columns
     chart_images = []
 
-    # Plotly 히스토그램 (수치형 컬럼별)
     for col in num_cols:
         st.write(f"📈 {col} 분포")
+
+        # KDE를 그릴 경우에는 density 스케일 권장
+        histnorm = y_scale
+        if show_kde and histnorm in ("count", None):
+            histnorm = "probability density"
+
+        # 히스토그램
         fig = px.histogram(
             df,
             x=col,
-            nbins=20,
-            color_discrete_sequence=["#1E90FF"],
+            nbins=nbins if BIN_MODE == "개수 지정" else None,
+            color_discrete_sequence=["#4C78A8"],
+            histnorm=None if histnorm == "count" else histnorm,
         )
-        _style_plotly(fig, title=f"{file_name} · {col} 분포")
+        # 간격 지정 모드면 bin 간격 강제
+        if BIN_MODE == "간격 지정" and binsize and binsize > 0:
+            fig.update_traces(xbins=dict(size=binsize))
+
+        # 막대 간격/외곽선/투명도 → 덜 답답하고 깔끔하게
+        fig.update_traces(
+            marker_line_color="white",
+            marker_line_width=1,
+            opacity=0.9,
+        )
+        fig.update_layout(
+            bargap=bargap,          # 막대 사이 간격
+            bargroupgap=0.05,       # 그룹 간 간격(여러 시리즈일 때)
+        )
+
+        # 공통 스타일
         fig.update_xaxes(title_text=col)
-        fig.update_yaxes(title_text="빈도")
+        fig.update_yaxes(title_text="빈도" if histnorm in (None, "count") else histnorm.title())
+        _style_plotly(fig, title=f"{file_name} · {col} 분포")
+
+        # ── KDE(밀도 곡선) 오버레이 ──
+        if show_kde:
+            vals = df[col].dropna().values
+            if len(vals) > 1 and np.isfinite(vals).all():
+                kde_fig = ff.create_distplot(
+                    [vals], [col],
+                    show_hist=False, show_rug=False,
+                    colors=["#E45756"], curve_type="kde"
+                )
+                # ff가 만든 곡선(trace)을 현재 fig에 추가
+                for tr in kde_fig.data:
+                    if tr.type == "scatter":
+                        tr.update(name="KDE", line=dict(width=2))
+                        fig.add_trace(tr)
+
+        # 출력
         st.plotly_chart(fig, use_container_width=True)
 
+        # PPT/엑셀/워드용 PNG 저장
         png = _fig_to_png_bytes(fig)
         if png is not None:
             chart_images.append((f"{col} 분포", png))
 
-    # 상관관계 히트맵 (수치형이 2개 이상일 때)
+    # 상관관계 히트맵
     if len(num_cols) >= 2:
         corr = df[num_cols].corr()
         z = corr.values
@@ -105,17 +161,14 @@ def analyze_excel(file, file_name):
         y = corr.columns.tolist()
         ann = corr.round(2).values
 
-        fig = ff.create_annotated_heatmap(
-            z=z, x=x, y=y,
-            colorscale="RdBu",
-            showscale=True,
-            reversescale=True,
-            annotation_text=ann
+        heat = ff.create_annotated_heatmap(
+            z=z, x=x, y=y, annotation_text=ann,
+            colorscale="RdBu", showscale=True, reversescale=True,
         )
-        _style_plotly(fig, title=f"{file_name} · 숫자형 상관관계")
-        st.plotly_chart(fig, use_container_width=True)
+        _style_plotly(heat, title=f"{file_name} · 숫자형 상관관계")
+        st.plotly_chart(heat, use_container_width=True)
 
-        png = _fig_to_png_bytes(fig)
+        png = _fig_to_png_bytes(heat)
         if png is not None:
             chart_images.append(("숫자형 상관관계", png))
 
@@ -152,9 +205,9 @@ def make_ppt_report(title: str, all_charts: dict) -> bytes:
                 continue
             slide = prs.slides.add_slide(prs.slide_layouts[5])
             slide.shapes.title.text = chart_title
-            left = Inches(0.8)
-            top = Inches(1.2)
-            width = Inches(8.4)
+            left = PptxInches(0.8)
+            top = PptxInches(1.2)
+            width = PptxInches(8.4)
             slide.shapes.add_picture(io.BytesIO(png_bytes), left, top, width=width)
 
     out = io.BytesIO()
@@ -213,6 +266,54 @@ def make_excel_with_images(all_dfs, all_charts) -> bytes:
     return out.getvalue()
 
 
+def make_word_report(title: str, all_dfs: list[pd.DataFrame], all_texts: list[str], all_charts: dict) -> bytes:
+    """
+    python-docx 로 .docx 생성
+    - 제목, 데이터 요약 테이블, PDF 일부 텍스트, 차트 이미지 삽입
+    """
+    doc = Document()
+    doc.add_heading(title, level=1)
+    doc.add_paragraph(f"자동 생성 · {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    # 데이터 요약 표
+    for i, df in enumerate(all_dfs, start=1):
+        doc.add_heading(f"데이터셋 {i} 요약", level=2)
+        desc = df.describe(include="all")
+        # 표로 렌더링
+        table = doc.add_table(rows=1 + len(desc.index), cols=1 + len(desc.columns))
+        table.style = "Light List Accent 1"
+        # 헤더
+        hdr = table.rows[0].cells
+        hdr[0].text = ""
+        for j, col in enumerate(desc.columns, start=1):
+            hdr[j].text = str(col)
+        # 바디
+        for r_idx, idx_name in enumerate(desc.index, start=1):
+            row = table.rows[r_idx].cells
+            row[0].text = str(idx_name)
+            for c_idx, col in enumerate(desc.columns, start=1):
+                val = desc.loc[idx_name, col]
+                row[c_idx].text = "" if pd.isna(val) else str(val)
+
+    # PDF 텍스트
+    for i, txt in enumerate(all_texts, start=1):
+        doc.add_heading(f"PDF 문서 {i}", level=2)
+        doc.add_paragraph(txt[:1500] + ("..." if len(txt) > 1500 else ""))
+
+    # 차트 이미지
+    for ds_name, charts in all_charts.items():
+        doc.add_heading(f"차트 - {ds_name}", level=2)
+        for (title, png_bytes) in charts:
+            if not png_bytes:
+                continue
+            doc.add_paragraph(f"• {title}")
+            doc.add_picture(io.BytesIO(png_bytes), width=DocxInches(6.5))
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
 # ====================== 메인 로직 ======================
 if uploaded_files:
     all_dfs = []           # [DataFrame, ...]
@@ -267,7 +368,15 @@ if uploaded_files:
                 file_name="event_report.pptx"
             )
 
-        # 4) 선택: 차트 PNG ZIP (PNG 생성된 차트만 포함)
+        # 4) Word(.docx) 보고서 (차트 포함)
+        docx_bytes = make_word_report("이벤트 결과 보고서 ✨", all_dfs, all_texts, all_charts)
+        st.download_button(
+            "📝 Word 보고서(.docx) 다운로드",
+            data=docx_bytes,
+            file_name="event_report.docx"
+        )
+
+        # 5) 선택: 차트 PNG ZIP (PNG 생성된 차트만 포함)
         if any(len(v) > 0 for v in all_charts.values()):
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
