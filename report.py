@@ -170,30 +170,58 @@ def _humanize_plan(plan: dict) -> str:
         md.append("> 🤔 유의미한 추천이 없습니다. 최소 1개 이상의 숫자형/날짜형 컬럼이 필요해요.")
     return "\n".join(md)
 
-def _plan_editor(plan: dict):
+def _plan_editor(plan: dict, key_prefix: str):
+    """
+    추천 플랜을 사용자가 바로 다듬을 수 있는 간단 편집기(체크/선택).
+    key_prefix를 붙여서 위젯 키 중복 방지.
+    """
     with st.expander("🛠 추천 플랜 편집", expanded=False):
+        # 시계열 체크박스
         ts = plan.get("timeseries", [])
         if ts:
             st.markdown("**⏱ 시계열 포함 여부**")
             new_ts = []
             for (dcol, ncol) in ts:
-                on = st.checkbox(f"{dcol} → {ncol}", value=True, key=f"ts_{dcol}_{ncol}")
-                if on: new_ts.append((dcol, ncol))
+                on = st.checkbox(
+                    f"{dcol} → {ncol}",
+                    value=True,
+                    key=f"{key_prefix}_ts_{dcol}_{ncol}"
+                )
+                if on:
+                    new_ts.append((dcol, ncol))
             plan["timeseries"] = new_ts
 
+        # 숫자형 멀티셀렉트
         nd = plan.get("numeric_dists", [])
         if nd:
             st.markdown("**📈 숫자형 분포(멀티 선택)**")
-            selected_nd = st.multiselect("포함할 지표", options=nd, default=nd, key="nd_select")
+            selected_nd = st.multiselect(
+                "포함할 지표",
+                options=nd,
+                default=nd,
+                key=f"{key_prefix}_nd_select"
+            )
             plan["numeric_dists"] = selected_nd
 
+        # 범주형 멀티셀렉트
         ct = plan.get("categoricals", [])
         if ct:
             st.markdown("**🧩 범주형 분포(멀티 선택)**")
-            selected_ct = st.multiselect("포함할 컬럼", options=ct, default=ct, key="ct_select")
+            selected_ct = st.multiselect(
+                "포함할 컬럼",
+                options=ct,
+                default=ct,
+                key=f"{key_prefix}_ct_select"
+            )
             plan["categoricals"] = selected_ct
 
-        plan["correlation"] = st.checkbox("🔗 상관관계 분석 포함", value=plan.get("correlation", False), key="cor_on")
+        # 상관관계 체크박스
+        plan["correlation"] = st.checkbox(
+            "🔗 상관관계 분석 포함",
+            value=plan.get("correlation", False),
+            key=f"{key_prefix}_cor_on"
+        )
+
         st.info("설정이 즉시 반영됩니다. ‘결과 보고서 생성’ 시 편집된 플랜이 사용됩니다.")
     return plan
 
@@ -284,7 +312,10 @@ def render_excel(file, file_name, prefs):
                 "다음 추천 플랜을 한국어 한 문장으로 요약해 주세요(존댓말): " + str(plan)
             )
             st.caption("🧠 자동 요약: " + one_liner)
-    plan = _plan_editor(plan)
+
+    # 위젯 key 충돌 방지를 위한 prefix
+    safe_name = file_name.replace("/", "_").replace("\\", "_")
+    plan = _plan_editor(plan, key_prefix=f"plan_{safe_name}")
 
     # Ollama 개요
     overview_text = ""
@@ -426,7 +457,9 @@ def render_excel(file, file_name, prefs):
         chart_images.append(("숫자형 상관관계", png))
         chart_explanations["숫자형 상관관계"] = exp
 
-    return df, chart_images, chart_explanations, overview_text, _humanize_plan(plan)
+    # 사람 친화 플랜 텍스트 반환(보고서 개요에 포함 가능)
+    plan_md_text = _humanize_plan(plan)
+    return df, chart_images, chart_explanations, overview_text, plan_md_text
 
 # ---------- 내보내기 ----------
 def make_ppt_report(title: str, charts: dict, explanations: dict, overview_text: str) -> bytes:
@@ -557,7 +590,7 @@ if uploaded_files:
             df, imgs, exps, ov, plan_md_text = render_excel(file, name, st.session_state.prefs)
             all_dfs.append(df)
             all_charts[name] = imgs
-            all_explanations[name] = {t:e for (t,e) in exps.items()} if isinstance(exps, dict) else exps
+            all_explanations[name] = exps  # dict(title->exp)
             overview_by_dataset[name] = ov
             plan_text_by_dataset[name] = plan_md_text
         elif name.lower().endswith("pdf"):
