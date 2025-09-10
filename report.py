@@ -18,7 +18,9 @@ from docx.shared import Inches as DocxInches
 # ===== 한글 폰트 설정 (Matplotlib 대비 및 Plotly 폰트 패밀리 지정용) =====
 from matplotlib import font_manager, rcParams
 import os
+import matplotlib.pyplot as plt  # Matplotlib 대체 내보내기용
 
+# 프로젝트 루트/fonts/MaruBuri-Regular.ttf 사용
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "MaruBuri-Regular.ttf")
 if os.path.exists(FONT_PATH):
     try:
@@ -33,14 +35,17 @@ rcParams["axes.unicode_minus"] = False
 PLOTLY_FONT_FAMILY = "MaruBuri, NanumGothic, 'Malgun Gothic', AppleGothic, 'Noto Sans CJK KR', 'DejaVu Sans', sans-serif"
 
 def _style_plotly(fig, title=None):
+    # 제목 잘림 방지: 여백(t), 축 제목 간격(standoff), 중앙 정렬
     fig.update_layout(
         template="plotly_white",
         title=title if title else fig.layout.title.text,
         title_x=0.5,
         title_font_size=18,
         font=dict(family=PLOTLY_FONT_FAMILY),
-        margin=dict(l=40, r=20, t=60, b=40),
+        margin=dict(l=50, r=30, t=90, b=50),
     )
+    fig.update_xaxes(title_standoff=8, automargin=True)
+    fig.update_yaxes(title_standoff=12, automargin=True)
     return fig
 
 def _fig_to_png_bytes(fig):
@@ -48,10 +53,10 @@ def _fig_to_png_bytes(fig):
     try:
         return fig.to_image(format="png", scale=2)
     except Exception:
-        # kaleido 미설치 등: 처음 한 번만 경고
+        # kaleido 미설치 등: 처음 한 번만 안내
         if not st.session_state.get("_warn_kaleido", False):
             st.session_state["_warn_kaleido"] = True
-            st.info("PNG 내보내기를 위해 requirements.txt에 `kaleido`가 필요합니다.")
+            st.info("PNG 내보내기를 위해 requirements.txt에 `kaleido`가 필요합니다. (자동 대체: Matplotlib)")
         return None
 
 # --- KDE 유틸: scipy가 있으면 gaussian_kde 사용, 없으면 None 반환 (에러 없이 스킵) ---
@@ -74,13 +79,42 @@ def _try_kde(values, n_points=200):
     except Exception:
         return None, None
 
+# --- Matplotlib 대체 내보내기(Plotly→PNG 실패 시) ---
+def _mpl_hist_png(series, title, xlabel, bins=20):
+    buf = io.BytesIO()
+    fig, ax = plt.subplots(figsize=(6.4, 4.2))
+    ax.hist(series.dropna().values, bins=bins, edgecolor="white", alpha=0.9)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("개수")
+    fig.tight_layout()
+    fig.savefig(buf, format="png", dpi=200)
+    plt.close(fig)
+    return buf.getvalue()
+
+def _mpl_corr_png(corr_df, title):
+    import numpy as _np
+    buf = io.BytesIO()
+    fig, ax = plt.subplots(figsize=(6.4, 5.0))
+    cax = ax.imshow(corr_df.values, cmap="RdBu", vmin=-1, vmax=1)
+    ax.set_xticks(_np.arange(len(corr_df.columns)))
+    ax.set_yticks(_np.arange(len(corr_df.columns)))
+    ax.set_xticklabels(corr_df.columns, rotation=90)
+    ax.set_yticklabels(corr_df.columns)
+    ax.set_title(title)
+    fig.colorbar(cax)
+    fig.tight_layout()
+    fig.savefig(buf, format="png", dpi=200)
+    plt.close(fig)
+    return buf.getvalue()
+
 st.title("✨ 이벤트 결과보고서 자동생성 프로그램 (Plotly 개선판)")
 
 # ===== 차트 옵션 (사이드바) =====
 st.sidebar.header("차트 옵션")
 BIN_MODE = st.sidebar.radio("빈 구분 방법", ["자동", "개수 지정", "간격 지정"], index=0, horizontal=True)
 nbins = st.sidebar.slider("빈 개수", 5, 100, 20) if BIN_MODE == "개수 지정" else None
-binsize = st.sidebar.number_input("빈 간격(숫자)", min_value=0.0, value=0.0, step=100.0) if BIN_MODE == "간격 지정" else None
+binsize = st.sidebar.number_input("빈 간격(숫자)", min_value=0.0, value=0.0, step=1.0) if BIN_MODE == "간격 지정" else None
 bargap = st.sidebar.slider("막대 간격(bargap)", 0.00, 0.50, 0.25, 0.01)
 show_kde = st.sidebar.checkbox("밀도 곡선(KDE) 표시", value=True)
 y_scale = st.sidebar.selectbox("세로축 단위", ["count", "percent", "probability density"], index=0)
@@ -91,6 +125,15 @@ uploaded_files = st.file_uploader(
     type=["xlsx", "xls", "pdf"],
     accept_multiple_files=True
 )
+
+def _korean_y_label_and_format(histnorm):
+    """히스토그램 세로축(한국어 라벨 + 예쁜 포맷)"""
+    if histnorm in (None, "count"):
+        return "개수", ",.0f", None, "none"  # label, tickformat, ticksuffix, exponentformat
+    if histnorm == "percent":
+        return "백분율(%)", ".1f", "%", "none"
+    # probability density
+    return "확률밀도", ".3f", None, "none"
 
 def analyze_excel(file, file_name):
     df = pd.read_excel(file)
@@ -118,6 +161,9 @@ def analyze_excel(file, file_name):
         if show_kde and histnorm in ("count", None):
             histnorm = "probability density"
 
+        # 제목을 두 줄로 분리해 잘림 방지
+        title = f"{file_name}<br>{col} 분포"
+
         fig = px.histogram(
             df, x=col,
             nbins=nbins if BIN_MODE == "개수 지정" else None,
@@ -129,9 +175,17 @@ def analyze_excel(file, file_name):
 
         fig.update_traces(marker_line_color="white", marker_line_width=1, opacity=0.9)
         fig.update_layout(bargap=bargap, bargroupgap=0.06)
+
+        y_label, y_tickformat, y_suffix, expfmt = _korean_y_label_and_format(histnorm)
         fig.update_xaxes(title_text=col)
-        fig.update_yaxes(title_text="빈도" if histnorm in (None, "count") else histnorm.title())
-        _style_plotly(fig, title=f"{file_name} · {col} 분포")
+        fig.update_yaxes(
+            title_text=y_label,
+            tickformat=y_tickformat,
+            ticksuffix=(y_suffix or ""),
+            showexponent="none",
+            exponentformat=expfmt,
+        )
+        _style_plotly(fig, title=title)
 
         # ── KDE(밀도 곡선) 오버레이 ── (scipy 없으면 자동 스킵)
         if show_kde:
@@ -142,9 +196,14 @@ def analyze_excel(file, file_name):
                                 name="KDE", line=dict(color="#E45756", width=2))
 
         st.plotly_chart(fig, use_container_width=True)
+
+        # PNG 저장(Plotly → 실패 시 Matplotlib 대체)
         png = _fig_to_png_bytes(fig)
-        if png is not None:
-            chart_images.append((f"{col} 분포", png))
+        if png is None:
+            # Matplotlib 대체: bins 추정
+            fallback_bins = nbins if (BIN_MODE == "개수 지정" and nbins) else 20
+            png = _mpl_hist_png(df[col], f"{file_name} · {col} 분포", col, bins=fallback_bins)
+        chart_images.append((f"{col} 분포", png))
 
     # 상관관계 히트맵
     if len(num_cols) >= 2:
@@ -158,12 +217,14 @@ def analyze_excel(file, file_name):
             z=z, x=x, y=y, annotation_text=ann,
             colorscale="RdBu", showscale=True, reversescale=True,
         )
-        _style_plotly(heat, title=f"{file_name} · 숫자형 상관관계")
+        heat.update_coloraxes(colorbar_title="상관계수")
+        _style_plotly(heat, title=f"{file_name}<br>숫자형 상관관계")
         st.plotly_chart(heat, use_container_width=True)
 
         png = _fig_to_png_bytes(heat)
-        if png is not None:
-            chart_images.append(("숫자형 상관관계", png))
+        if png is None:
+            png = _mpl_corr_png(corr, f"{file_name} · 숫자형 상관관계")
+        chart_images.append(("숫자형 상관관계", png))
 
     return df, chart_images
 
@@ -184,8 +245,10 @@ def make_ppt_report(title: str, all_charts: dict) -> bytes:
     slide.placeholders[1].text = f"자동 생성 · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
     for dataset_name, charts in all_charts.items():
+        # 섹션 타이틀
         s = prs.slides.add_slide(prs.slide_layouts[5])
         s.shapes.title.text = f"📦 {dataset_name}"
+        # 개별 차트
         for chart_title, png_bytes in charts:
             if not png_bytes:
                 continue
@@ -271,10 +334,11 @@ def make_word_report(title: str, all_dfs: list[pd.DataFrame], all_texts: list[st
     return out.getvalue()
 
 # ====================== 메인 로직 ======================
-if uploaded_files:
+uploaded = uploaded_files
+if uploaded:
     all_dfs = []; all_texts = []; all_charts = {}
 
-    for file in uploaded_files:
+    for file in uploaded:
         file_name = file.name
         if file_name.lower().endswith(("xlsx", "xls")):
             df, charts = analyze_excel(file, file_name)
@@ -305,10 +369,9 @@ if uploaded_files:
         st.download_button("📊 Excel 보고서(차트 내장) 다운로드", data=excel_with_imgs,
                            file_name="event_report_with_charts.xlsx")
 
-        # PPT
-        if any(len(v) > 0 for v in all_charts.values()):
-            ppt_bytes = make_ppt_report("이벤트 결과 보고서 ✨", all_charts)
-            st.download_button("📽 PPT 보고서(차트 포함) 다운로드", data=ppt_bytes, file_name="event_report.pptx")
+        # PPT (차트 없어도 제목/섹션만 생성)
+        ppt_bytes = make_ppt_report("이벤트 결과 보고서 ✨", all_charts)
+        st.download_button("📽 PPT 보고서(차트 포함) 다운로드", data=ppt_bytes, file_name="event_report.pptx")
 
         # Word
         docx_bytes = make_word_report("이벤트 결과 보고서 ✨", all_dfs, all_texts, all_charts)
