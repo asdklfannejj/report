@@ -1,4 +1,6 @@
-# report.py — Chat 기반 보고서 메이커 / Plotly / Ollama 설명 / PPT·Word·Excel / 추천 플랜
+# report.py — 채팅형 보고서 메이커 / Plotly / Ollama 설명 / 추천 플랜(사람 친화형+편집) / PPT·Word·Excel
+# 요구 패키지(requirements.txt):
+# streamlit, pandas, numpy, plotly, kaleido, pdfplumber, openpyxl, xlsxwriter, python-pptx, python-docx, requests
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,11 +9,14 @@ import plotly.figure_factory as ff
 import pdfplumber
 import io, zipfile, requests, os
 from datetime import datetime
+
 from pptx import Presentation
 from pptx.util import Inches as PptxInches, Pt
 from pptx.enum.text import PP_ALIGN
+
 from docx import Document
 from docx.shared import Inches as DocxInches
+
 from matplotlib import font_manager, rcParams
 import matplotlib.pyplot as plt
 
@@ -58,7 +63,8 @@ def _try_kde(values, n_points=200):
         from scipy.stats import gaussian_kde
         vals = np.asarray(values, dtype=float)
         vals = vals[isfinite(vals)]
-        if vals.size < 2: return None, None
+        if vals.size < 2:
+            return None, None
         kde = gaussian_kde(vals)
         xs = linspace(float(vals.min()), float(vals.max()), n_points)
         ys = kde(xs)
@@ -99,20 +105,16 @@ def _ollama_generate(base_url: str, model: str, prompt: str, timeout: int = 90) 
 
 # ---------- 추천 플랜 ----------
 def infer_schema(df: pd.DataFrame):
-    # 날짜형 추정
     date_cols, numeric_cols, cat_cols = [], [], []
     for c in df.columns:
         s = df[c]
         if pd.api.types.is_numeric_dtype(s):
             numeric_cols.append(c)
         else:
-            # 날짜 파싱 성공률로 판정
             try:
-                parsed = pd.to_datetime(s, errors="raise", infer_datetime_format=True)
-                # 파싱 성공했으면 날짜형으로 인정
+                pd.to_datetime(s, errors="raise", infer_datetime_format=True)
                 date_cols.append(c)
             except Exception:
-                # 카테고리 판단: 고유값 수가 상대적으로 작으면 카테고리로
                 if s.dropna().nunique() <= max(20, int(len(s) * 0.05)):
                     cat_cols.append(c)
     return date_cols, numeric_cols, cat_cols
@@ -120,16 +122,79 @@ def infer_schema(df: pd.DataFrame):
 def recommend_plan(df: pd.DataFrame) -> dict:
     date_cols, numeric_cols, cat_cols = infer_schema(df)
     plan = {"timeseries": [], "numeric_dists": [], "categoricals": [], "correlation": False}
-    # 시계열: (date_col, numeric_col 상위 3)
     if date_cols and numeric_cols:
         for n in numeric_cols[:3]:
             plan["timeseries"].append((date_cols[0], n))
-    # 숫자 분포: 상위 5개
     plan["numeric_dists"] = numeric_cols[:5]
-    # 카테고리 분포: 상위 3개
     plan["categoricals"] = cat_cols[:3]
-    # 상관관계: 숫자형이 2개 이상이면
     plan["correlation"] = len(numeric_cols) >= 2
+    return plan
+
+# --- 사람이 읽기 쉬운 추천 플랜 렌더러 & 편집기 ---
+def _humanize_plan(plan: dict) -> str:
+    ts = plan.get("timeseries", [])
+    nd = plan.get("numeric_dists", [])
+    ct = plan.get("categoricals", [])
+    cor = plan.get("correlation", False)
+
+    md = []
+    md.append("### 🔎 추천 보고서 플랜 (요약)")
+    if ts:
+        md.append(f"- ⏱ **시계열**: 날짜 기준 지표 {len(ts)}개")
+    if nd:
+        md.append(f"- 📈 **숫자 분포**: {len(nd)}개 지표")
+    if ct:
+        md.append(f"- 🧩 **범주 분포**: {len(ct)}개 컬럼")
+    md.append(f"- 🔗 **상관관계 분석**: {'실행 권장' if cor else '불필요'}")
+    md.append("")
+
+    if ts:
+        md.append("**시계열 후보**")
+        md.append("| 날짜열 | 지표 |")
+        md.append("|---|---|")
+        for dcol, ncol in ts:
+            md.append(f"| {dcol} | {ncol} |")
+        md.append("")
+
+    if nd:
+        md.append("**숫자형 분포 후보**")
+        md.append(", ".join([f"`{c}`" for c in nd]))
+        md.append("")
+
+    if ct:
+        md.append("**범주형 분포 후보**")
+        md.append(", ".join([f"`{c}`" for c in ct]))
+        md.append("")
+
+    if not (ts or nd or ct):
+        md.append("> 🤔 유의미한 추천이 없습니다. 최소 1개 이상의 숫자형/날짜형 컬럼이 필요해요.")
+    return "\n".join(md)
+
+def _plan_editor(plan: dict):
+    with st.expander("🛠 추천 플랜 편집", expanded=False):
+        ts = plan.get("timeseries", [])
+        if ts:
+            st.markdown("**⏱ 시계열 포함 여부**")
+            new_ts = []
+            for (dcol, ncol) in ts:
+                on = st.checkbox(f"{dcol} → {ncol}", value=True, key=f"ts_{dcol}_{ncol}")
+                if on: new_ts.append((dcol, ncol))
+            plan["timeseries"] = new_ts
+
+        nd = plan.get("numeric_dists", [])
+        if nd:
+            st.markdown("**📈 숫자형 분포(멀티 선택)**")
+            selected_nd = st.multiselect("포함할 지표", options=nd, default=nd, key="nd_select")
+            plan["numeric_dists"] = selected_nd
+
+        ct = plan.get("categoricals", [])
+        if ct:
+            st.markdown("**🧩 범주형 분포(멀티 선택)**")
+            selected_ct = st.multiselect("포함할 컬럼", options=ct, default=ct, key="ct_select")
+            plan["categoricals"] = selected_ct
+
+        plan["correlation"] = st.checkbox("🔗 상관관계 분석 포함", value=plan.get("correlation", False), key="cor_on")
+        st.info("설정이 즉시 반영됩니다. ‘결과 보고서 생성’ 시 편집된 플랜이 사용됩니다.")
     return plan
 
 # ---------- UI: 사이드바 ----------
@@ -158,19 +223,17 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "prefs" not in st.session_state:
     st.session_state.prefs = {
-        "audience": "일반",          # "임원", "실무"
-        "tone": "간결",              # "간결", "상세"
+        "audience": "일반",
+        "tone": "간결",
         "outputs": {"md": True, "excel": True, "ppt": True, "docx": True},
         "sections": {"overview": True, "numeric": True, "categorical": True, "timeseries": True, "correlation": True},
-        "kpis": [],                 # 사용자가 지정한 핵심 지표 컬럼
+        "kpis": [],
     }
 
 def chat_bot_reply(user_text):
     u = user_text.strip().lower()
     prefs = st.session_state.prefs
     msg = ""
-
-    # 간단한 명령 파서 (/audience 임원|실무, /tone 간결|상세, /out ppt,word,md,excel, /kpi col1,col2)
     if u.startswith("/audience"):
         if "임원" in user_text: prefs["audience"] = "임원"; msg = "대상: 임원용으로 설정했어요."
         elif "실무" in user_text: prefs["audience"] = "실무"; msg = "대상: 실무용으로 설정했어요."
@@ -189,7 +252,6 @@ def chat_bot_reply(user_text):
         prefs["kpis"] = [c for c in cols if c]
         msg = f"KPI 컬럼 지정: {prefs['kpis']}"
     else:
-        # 자연어 요청을 간단 분류
         if "임원" in u: prefs["audience"]="임원"; msg += "임원용 요약 위주로 구성할게요. "
         if "실무" in u: prefs["audience"]="실무"; msg += "실무용 상세지표 중심으로 구성할게요. "
         if "간결" in u: prefs["tone"]="간결"; msg += "간결한 서술로 정리합니다. "
@@ -199,7 +261,6 @@ def chat_bot_reply(user_text):
         if "excel" in u or "엑셀" in u or "xlsx" in u: prefs["outputs"]["excel"] = True
         if "markdown" in u or "md" in u: prefs["outputs"]["md"] = True
         msg += "설정 반영 완료! '/audience 임원', '/tone 상세', '/out ppt,word', '/kpi 매출,전환율'처럼도 지시할 수 있어요."
-
     return msg
 
 # ---------- 유틸 ----------
@@ -215,10 +276,17 @@ def render_excel(file, file_name, prefs):
 
     # 추천 플랜
     plan = recommend_plan(df)
-    st.markdown("**🔎 추천 보고서 플랜**")
-    st.write(plan)
+    with st.expander("🔎 추천 보고서 플랜", expanded=True):
+        st.markdown(_humanize_plan(plan))
+        if use_ollama:
+            one_liner = _ollama_generate(
+                ollama_base, ollama_model,
+                "다음 추천 플랜을 한국어 한 문장으로 요약해 주세요(존댓말): " + str(plan)
+            )
+            st.caption("🧠 자동 요약: " + one_liner)
+    plan = _plan_editor(plan)
 
-    # Ollama로 "개요" 문단 (옵션)
+    # Ollama 개요
     overview_text = ""
     if use_ollama:
         prompt = (
@@ -231,9 +299,8 @@ def render_excel(file, file_name, prefs):
         with st.expander("🗒️ 자동 개요", expanded=True):
             st.write(overview_text)
 
-    chart_images = []          # [(title, png)]
-    chart_explanations = []    # [(title, explanation)]
-    all_fig_explanations = {}  # dataset scope explanations
+    chart_images = []
+    chart_explanations = {}
 
     # 기본 통계
     st.write("✅ 데이터 요약")
@@ -242,20 +309,17 @@ def render_excel(file, file_name, prefs):
     except Exception:
         st.text(df.describe(include="all").to_string())
 
-    # ---- 시계열 라인 ----
+    # ---- 시계열 ----
     if prefs["sections"]["timeseries"] and plan["timeseries"]:
         for (dcol, ncol) in plan["timeseries"]:
             try:
                 tdf = df[[dcol, ncol]].dropna()
-                tdf[dcol] = pd.to_datetime(tdf[dcol], errors="coerce")
-                tdf = tdf.dropna()
-                tdf = tdf.sort_values(dcol)
+                tdf[dcol] = pd.to_datetime(tdf[dcol], errors="coerce"); tdf = tdf.dropna().sort_values(dcol)
                 title = f"{file_name}<br>{ncol} - 시계열({dcol})"
                 fig = px.line(tdf, x=dcol, y=ncol, markers=True)
                 _style_plotly(fig, title=title)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # 설명
                 exp = ""
                 if use_ollama:
                     p = (f"시계열 그래프를 2~3문장으로 요약하세요. 대상:{prefs['audience']} 어조:{prefs['tone']} "
@@ -265,7 +329,7 @@ def render_excel(file, file_name, prefs):
                         st.write(exp)
                 png = _fig_to_png_bytes(fig) or _mpl_hist_png(tdf[ncol], f"{file_name} · {ncol} 분포(대체)", ncol, 20)
                 chart_images.append((f"{ncol} 시계열", png))
-                chart_explanations.append((f"{ncol} 시계열", exp))
+                chart_explanations[f"{ncol} 시계열"] = exp
             except Exception:
                 pass
 
@@ -274,7 +338,8 @@ def render_excel(file, file_name, prefs):
         histnorm = y_scale
         if show_kde and histnorm in ("count", None): histnorm = "probability density"
         title = f"{file_name}<br>{col} 분포"
-        fig = px.histogram(df, x=col, nbins=nbins if BIN_MODE=="개수 지정" else None,
+        fig = px.histogram(df, x=col,
+                           nbins=nbins if BIN_MODE=="개수 지정" else None,
                            color_discrete_sequence=["#4C78A8"],
                            histnorm=None if histnorm=="count" else histnorm)
         if BIN_MODE == "간격 지정" and binsize and binsize>0:
@@ -287,7 +352,6 @@ def render_excel(file, file_name, prefs):
                          ticksuffix=(y_suffix or ""), showexponent="none", exponentformat=expfmt)
         _style_plotly(fig, title=title)
 
-        # KDE
         if show_kde:
             vals = df[col].dropna().values
             xs, ys = _try_kde(vals)
@@ -297,7 +361,6 @@ def render_excel(file, file_name, prefs):
 
         exp = ""
         if use_ollama:
-            # KPI면 더 강조
             note = " (핵심 KPI)" if col in prefs["kpis"] else ""
             prompt = (
                 f"히스토그램 해설{note}: 데이터셋:{file_name}, 컬럼:{col}, 단위:{y_label}. "
@@ -311,28 +374,29 @@ def render_excel(file, file_name, prefs):
             fallback_bins = nbins if (BIN_MODE=="개수 지정" and nbins) else 20
             png = _mpl_hist_png(df[col], f"{file_name} · {col} 분포", col, bins=fallback_bins)
         chart_images.append((f"{col} 분포", png))
-        chart_explanations.append((f"{col} 분포", exp))
+        chart_explanations[f"{col} 분포"] = exp
 
-    # ---- 카테고리 분포 ----
-    for col in plan["categoricals"]:
-        vc = df[col].astype(str).value_counts().head(15)
-        title = f"{file_name}<br>{col} 상위 빈도"
-        fig = px.bar(x=vc.index, y=vc.values, text=vc.values, labels={"x": col, "y": "개수"},
-                     color_discrete_sequence=["#4C78A8"])
-        _style_plotly(fig, title=title)
-        fig.update_traces(textposition="outside"); fig.update_layout(yaxis_title="개수")
-        st.plotly_chart(fig, use_container_width=True)
+    # ---- 범주형 분포 ----
+    if "categoricals" in plan and plan["categoricals"]:
+        for col in plan["categoricals"]:
+            vc = df[col].astype(str).value_counts().head(15)
+            title = f"{file_name}<br>{col} 상위 빈도"
+            fig = px.bar(x=vc.index, y=vc.values, text=vc.values, labels={"x": col, "y": "개수"},
+                         color_discrete_sequence=["#4C78A8"])
+            _style_plotly(fig, title=title)
+            fig.update_traces(textposition="outside"); fig.update_layout(yaxis_title="개수")
+            st.plotly_chart(fig, use_container_width=True)
 
-        exp = ""
-        if use_ollama:
-            prompt = (f"막대그래프 해설: 데이터셋:{file_name}, 범주:{col}, 상위 항목과 편중을 2문장으로 설명하고 "
-                      f"업무적 시사점을 1문장 제안해 주세요(존댓말).")
-            exp = _ollama_generate(ollama_base, ollama_model, prompt)
-            with st.expander(f"🗒️ {col} 범주 설명", expanded=False): st.write(exp)
+            exp = ""
+            if use_ollama:
+                prompt = (f"막대그래프 해설: 데이터셋:{file_name}, 범주:{col}, 상위 항목과 편중을 2문장으로 설명하고 "
+                          f"업무적 시사점을 1문장 제안해 주세요(존댓말).")
+                exp = _ollama_generate(ollama_base, ollama_model, prompt)
+                with st.expander(f"🗒️ {col} 범주 설명", expanded=False): st.write(exp)
 
-        png = _fig_to_png_bytes(fig) or _mpl_hist_png(pd.Series(vc.values), f"{col} 빈도(대체)", "빈도", 15)
-        chart_images.append((f"{col} 범주", png))
-        chart_explanations.append((f"{col} 범주", exp))
+            png = _fig_to_png_bytes(fig) or _mpl_hist_png(pd.Series(vc.values), f"{col} 빈도(대체)", "빈도", 15)
+            chart_images.append((f"{col} 범주", png))
+            chart_explanations[f"{col} 범주"] = exp
 
     # ---- 상관관계 ----
     if prefs["sections"]["correlation"] and plan["correlation"]:
@@ -348,7 +412,6 @@ def render_excel(file, file_name, prefs):
 
         exp = ""
         if use_ollama:
-            # 상관 상위 쌍 요약
             pairs = []
             for i in range(len(x)):
                 for j in range(i+1, len(y)):
@@ -361,9 +424,9 @@ def render_excel(file, file_name, prefs):
 
         png = _fig_to_png_bytes(heat) or _mpl_corr_png(corr, f"{file_name} · 숫자형 상관관계")
         chart_images.append(("숫자형 상관관계", png))
-        chart_explanations.append(("숫자형 상관관계", exp))
+        chart_explanations["숫자형 상관관계"] = exp
 
-    return df, chart_images, chart_explanations, overview_text
+    return df, chart_images, chart_explanations, overview_text, _humanize_plan(plan)
 
 # ---------- 내보내기 ----------
 def make_ppt_report(title: str, charts: dict, explanations: dict, overview_text: str) -> bytes:
@@ -372,11 +435,10 @@ def make_ppt_report(title: str, charts: dict, explanations: dict, overview_text:
     slide.shapes.title.text = title
     slide.placeholders[1].text = f"자동 생성 · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
-    # 개요 슬라이드
     if overview_text:
         s = prs.slides.add_slide(prs.slide_layouts[5])
         s.shapes.title.text = "요약 개요"
-        tx = s.shapes.add_textbox(PptxInches(0.8), PptxInches(1.5), PptxInches(8.4), PptxInches(3.5))
+        tx = s.shapes.add_textbox(PptxInches(0.8), PptxInches(1.5), PptxInches(8.4), PptxInches(3.6))
         tf = tx.text_frame; tf.clear()
         p = tf.paragraphs[0]; p.text = overview_text; p.font.size = Pt(16)
 
@@ -388,10 +450,9 @@ def make_ppt_report(title: str, charts: dict, explanations: dict, overview_text:
             if png_bytes:
                 left = PptxInches(0.6); top = PptxInches(1.2); width = PptxInches(8.6)
                 slide.shapes.add_picture(io.BytesIO(png_bytes), left, top, width=width)
-            # 아래 설명 박스
             exp = explanations.get(dataset_name, {}).get(title, "")
             if exp:
-                tx = slide.shapes.add_textbox(PptxInches(0.6), PptxInches(5.7), PptxInches(8.6), PptxInches(1.5))
+                tx = slide.shapes.add_textbox(PptxInches(0.6), PptxInches(5.7), PptxInches(8.6), PptxInches(1.6))
                 tf = tx.text_frame; tf.clear()
                 p = tf.paragraphs[0]; p.text = exp; p.font.size = Pt(14); p.alignment = PP_ALIGN.LEFT
 
@@ -471,16 +532,15 @@ def analyze_pdf(file, file_name):
 # ================== 메인 ==================
 all_dfs, all_texts = [], []
 all_charts: dict[str, list[tuple[str, bytes]]] = {}
-all_explanations: dict[str, dict[str, str]] = {}  # {dataset: {title: exp}}
+all_explanations: dict[str, dict[str, str]] = {}
 overview_by_dataset: dict[str, str] = {}
+plan_text_by_dataset: dict[str, str] = {}
 
 if uploaded_files:
-    # 채팅 가이드(최초)
     if len(st.session_state.messages) == 0:
         st.session_state.messages.append({"role":"assistant",
-            "content":"어떤 스타일의 보고서를 원하세요? 예) '임원용, PPT/Word 중심, KPI는 매출·전환율, 상세' \n명령형: /audience 임원 /tone 상세 /out ppt,word /kpi 매출,전환율"})
+            "content":"어떤 스타일의 보고서를 원하세요? 예) '임원용, PPT/Word 중심, KPI는 매출·전환율, 상세'\n명령형: /audience 임원 /tone 상세 /out ppt,word /kpi 매출,전환율"})
 
-    # 채팅 UI
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
             st.write(m["content"])
@@ -491,53 +551,46 @@ if uploaded_files:
         with st.chat_message("assistant"):
             st.write(bot)
 
-    # 파일별 처리
     for file in uploaded_files:
         name = file.name
         if name.lower().endswith(("xlsx","xls")):
-            df, imgs, exps, ov = render_excel(file, name, st.session_state.prefs)
+            df, imgs, exps, ov, plan_md_text = render_excel(file, name, st.session_state.prefs)
             all_dfs.append(df)
             all_charts[name] = imgs
+            all_explanations[name] = {t:e for (t,e) in exps.items()} if isinstance(exps, dict) else exps
             overview_by_dataset[name] = ov
-            # 리스트[(title,exp)] → dict
-            all_explanations[name] = {t:e for (t,e) in exps}
+            plan_text_by_dataset[name] = plan_md_text
         elif name.lower().endswith("pdf"):
-            text = analyze_pdf(file, name); all_texts.append(text)
+            text = analyze_pdf(file, name)
+            all_texts.append(text)
 
-    # 생성 버튼
     if st.button("📥 결과 보고서 생성"):
-        # Markdown
+        merged_overview = "\n\n".join([t for t in list(overview_by_dataset.values()) + list(plan_text_by_dataset.values()) if t])
+
         if st.session_state.prefs["outputs"]["md"]:
             md = "# 🎯 이벤트 결과 보고서\n\n"
             md += f"- 대상: {st.session_state.prefs['audience']} / 어조: {st.session_state.prefs['tone']}\n"
             md += "✨ 자동 생성된 요약 리포트입니다.\n\n"
-            for n, ov in overview_by_dataset.items():
-                if ov: md += f"## {n} 개요\n{ov}\n\n"
+            if merged_overview:
+                md += "## 개요\n" + merged_overview + "\n\n"
             for i, df in enumerate(all_dfs, start=1):
                 md += f"## 데이터셋 {i} 요약\n"
                 try: md += df.describe(include="all").to_markdown() + "\n\n"
                 except Exception: md += df.describe(include="all").to_string() + "\n\n"
             st.download_button("📥 Markdown 보고서 다운로드", data=md, file_name="event_report.md")
 
-        # Excel
         if st.session_state.prefs["outputs"]["excel"]:
             xlsx = make_excel_with_images(all_dfs, all_charts)
             st.download_button("📊 Excel 보고서(차트 내장) 다운로드", data=xlsx, file_name="event_report_with_charts.xlsx")
 
-        # PPT
         if st.session_state.prefs["outputs"]["ppt"]:
-            # 데이터셋별 overview를 합쳐 첫 슬라이드 개요로
-            merged_overview = "\n\n".join([v for v in overview_by_dataset.values() if v])
             ppt = make_ppt_report("이벤트 결과 보고서 ✨", all_charts, all_explanations, merged_overview)
             st.download_button("📽 PPT 보고서(차트·설명 포함) 다운로드", data=ppt, file_name="event_report.pptx")
 
-        # Word
         if st.session_state.prefs["outputs"]["docx"]:
-            merged_overview = "\n\n".join([v for v in overview_by_dataset.values() if v])
             docx = make_word_report("이벤트 결과 보고서 ✨", all_dfs, all_texts, all_charts, all_explanations, merged_overview)
             st.download_button("📝 Word 보고서(.docx) 다운로드", data=docx, file_name="event_report.docx")
 
-        # 차트 PNG ZIP
         if any(len(v)>0 for v in all_charts.values()):
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
