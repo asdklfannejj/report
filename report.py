@@ -21,30 +21,6 @@ from matplotlib import font_manager, rcParams
 import matplotlib.pyplot as plt
 import os, time  # 이미 os 임포트되어 있으면 time만 추가
 
-# ======= 외부망/로컬 기본 설정 =======
-AVAILABLE_MODELS = ["gemma2:9b", "codellama:7b", "llama3.1:8b"]
-
-def _get_default_ollama_base() -> str:
-    """
-    로컬/외부망 환경에서 기본적으로 localhost에 연결.
-    환경변수 OLLAMA_BASE가 있으면 그 값을 우선 사용.
-    """
-    return os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434")
-
-def _ollama_healthcheck(base_url: str, timeout: int = 3) -> tuple[bool, str]:
-    """
-    /api/tags로 간단 헬스체크. (로컬/외부망에서 실행 가정)
-    """
-    try:
-        url = base_url.rstrip("/") + "/api/tags"
-        r = requests.get(url, timeout=timeout)
-        r.raise_for_status()
-        _ = r.json()
-        return True, "OK"
-    except Exception as e:
-        return False, str(e)
-
-
 
 # ---------- 한글 폰트 ----------
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "MaruBuri-Regular.ttf")
