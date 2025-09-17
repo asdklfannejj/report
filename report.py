@@ -19,6 +19,31 @@ from docx.shared import Inches as DocxInches
 
 from matplotlib import font_manager, rcParams
 import matplotlib.pyplot as plt
+import os, time  # 이미 os 임포트되어 있으면 time만 추가
+
+# ======= 폐쇄망/Compose용 기본 설정 =======
+AVAILABLE_MODELS = ["gemma2:9b", "codellama:7b", "llama3.1:8b"]
+
+def _get_default_ollama_base() -> str:
+    """
+    폐쇄망에서 docker-compose 서비스명으로 접근 (동일 네트워크).
+    환경변수 OLLAMA_BASE가 있으면 그 값을 우선.
+    """
+    return os.getenv("OLLAMA_BASE", "http://ollama:11434")
+
+def _ollama_healthcheck(base_url: str, timeout: int = 3) -> tuple[bool, str]:
+    """
+    /api/tags로 간단 헬스체크. (외부망 불필요)
+    """
+    try:
+        url = base_url.rstrip("/") + "/api/tags"
+        r = requests.get(url, timeout=timeout)
+        r.raise_for_status()
+        _ = r.json()
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
 
 # ---------- 한글 폰트 ----------
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "MaruBuri-Regular.ttf")
@@ -93,15 +118,26 @@ def _mpl_corr_png(corr_df, title):
 # ---------- Ollama ----------
 @st.cache_data(show_spinner=False, ttl=600)
 def _ollama_generate(base_url: str, model: str, prompt: str, timeout: int = 90) -> str:
-    try:
-        url = base_url.rstrip("/") + "/api/generate"
-        payload = {"model": model, "prompt": prompt, "stream": False}
-        r = requests.post(url, json=payload, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("response") or data.get("text") or ""
-    except Exception as e:
-        return f"(설명 생성 실패: {e})"
+    """
+    폐쇄망 환경 고려: 내부 네트워크로만 통신.
+    짧은 재시도(3회, 지수백오프) 내장.
+    """
+    url = base_url.rstrip("/") + "/api/generate"
+    payload = {"model": model, "prompt": prompt, "stream": False}
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json=payload, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            return data.get("response") or data.get("text") or ""
+        except Exception as e:
+            last_err = e
+            # 가벼운 백오프: 0.5s, 1s
+            time.sleep(0.5 * (attempt + 1))
+    return f"(설명 생성 실패: {last_err})"
+
 
 # ---------- 추천 플랜 ----------
 def infer_schema(df: pd.DataFrame):
@@ -232,14 +268,20 @@ with st.sidebar:
     st.header("📡 Ollama 설정")
     use_ollama = st.checkbox("그래프/요약 자동 설명 생성", value=False)
 
-    # 서버 URL 입력(필요 시 포트 포함)
-    ollama_base = st.text_input("서버 URL", value="http://127.0.0.1:11500")
+    # 서버 URL: 폐쇄망/compose 기본값은 http://ollama:11434
+    default_base = _get_default_ollama_base()
+    ollama_base = st.text_input("서버 URL", value=default_base)
 
-    # ✅ 고정 모델 3종만 선택 가능하도록 드롭다운
-    AVAILABLE_MODELS = ["gemma2:9b", "codellama:7b", "llama3.1:8b"]
-    ollama_model = st.selectbox("모델", AVAILABLE_MODELS, index=2)  # 기본값: llama3.1:8b
+    # ✅ 3개 고정 모델만 선택
+    ollama_model = st.selectbox("모델", AVAILABLE_MODELS, index=2)  # 기본: llama3.1:8b
+    st.caption("이 앱은 폐쇄망에서 다음 3개 모델만 사용합니다: gemma2:9b, codellama:7b, llama3.1:8b")
 
-    st.caption("이 앱은 Ollama의 다음 3개 모델만 사용합니다: gemma2:9b, codellama:7b, llama3.1:8b")
+    # 내부 헬스체크
+    ok, msg = _ollama_healthcheck(ollama_base)
+    if ok:
+        st.success("Ollama 연결: OK")
+    else:
+        st.warning(f"Ollama 연결 실패: {msg}")
 
     st.header("📊 차트 옵션")
     BIN_MODE = st.radio("빈 구분", ["자동", "개수 지정", "간격 지정"], index=0, horizontal=True)
@@ -248,6 +290,7 @@ with st.sidebar:
     bargap = st.slider("막대 간격", 0.00, 0.50, 0.25, 0.01)
     show_kde = st.checkbox("밀도 곡선(KDE)", value=True)
     y_scale = st.selectbox("세로축", ["count", "percent", "probability density"], index=0)
+
 
 
 # ---------- 업로드 ----------
