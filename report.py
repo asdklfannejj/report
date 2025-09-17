@@ -21,19 +21,19 @@ from matplotlib import font_manager, rcParams
 import matplotlib.pyplot as plt
 import os, time  # 이미 os 임포트되어 있으면 time만 추가
 
-# ======= 폐쇄망/Compose용 기본 설정 =======
+# ======= 외부망/로컬 기본 설정 =======
 AVAILABLE_MODELS = ["gemma2:9b", "codellama:7b", "llama3.1:8b"]
 
 def _get_default_ollama_base() -> str:
     """
-    폐쇄망에서 docker-compose 서비스명으로 접근 (동일 네트워크).
-    환경변수 OLLAMA_BASE가 있으면 그 값을 우선.
+    로컬/외부망 환경에서 기본적으로 localhost에 연결.
+    환경변수 OLLAMA_BASE가 있으면 그 값을 우선 사용.
     """
-    return os.getenv("OLLAMA_BASE", "http://ollama:11434")
+    return os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434")
 
 def _ollama_healthcheck(base_url: str, timeout: int = 3) -> tuple[bool, str]:
     """
-    /api/tags로 간단 헬스체크. (외부망 불필요)
+    /api/tags로 간단 헬스체크. (로컬/외부망에서 실행 가정)
     """
     try:
         url = base_url.rstrip("/") + "/api/tags"
@@ -43,6 +43,7 @@ def _ollama_healthcheck(base_url: str, timeout: int = 3) -> tuple[bool, str]:
         return True, "OK"
     except Exception as e:
         return False, str(e)
+
 
 
 # ---------- 한글 폰트 ----------
