@@ -231,9 +231,15 @@ st.title("✨ 채팅형 이벤트 결과보고서 메이커 (Ollama 설명 포�
 with st.sidebar:
     st.header("📡 Ollama 설정")
     use_ollama = st.checkbox("그래프/요약 자동 설명 생성", value=False)
-    ollama_model = st.text_input("모델", value="llama3.1")
+
+    # 서버 URL 입력(필요 시 포트 포함)
     ollama_base = st.text_input("서버 URL", value="http://127.0.0.1:11500")
-    st.caption("로컬 또는 원격 Ollama 서버를 사용합니다. (예: llama3.1, qwen2.5:7b-instruct)")
+
+    # ✅ 고정 모델 3종만 선택 가능하도록 드롭다운
+    AVAILABLE_MODELS = ["gemma2:9b", "codellama:7b", "llama3.1:8b"]
+    ollama_model = st.selectbox("모델", AVAILABLE_MODELS, index=2)  # 기본값: llama3.1:8b
+
+    st.caption("이 앱은 Ollama의 다음 3개 모델만 사용합니다: gemma2:9b, codellama:7b, llama3.1:8b")
 
     st.header("📊 차트 옵션")
     BIN_MODE = st.radio("빈 구분", ["자동", "개수 지정", "간격 지정"], index=0, horizontal=True)
@@ -242,6 +248,7 @@ with st.sidebar:
     bargap = st.slider("막대 간격", 0.00, 0.50, 0.25, 0.01)
     show_kde = st.checkbox("밀도 곡선(KDE)", value=True)
     y_scale = st.selectbox("세로축", ["count", "percent", "probability density"], index=0)
+
 
 # ---------- 업로드 ----------
 uploaded_files = st.file_uploader("📂 파일 업로드 (Excel 또는 PDF)", type=["xlsx","xls","pdf"], accept_multiple_files=True)
